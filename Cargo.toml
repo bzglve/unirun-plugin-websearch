@@ -1,0 +1,12 @@
+[package]
+name = "unirun-plugin-websearch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+unirun-if = { path = "../../unirun-interface", package = "unirun-interface" }
+glib = { workspace = true }
+gio = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+open = "5.3"
