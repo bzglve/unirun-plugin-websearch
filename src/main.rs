@@ -3,30 +3,26 @@ mod engine;
 use std::{cell::RefCell, error::Error, rc::Rc};
 
 use engine::Engine;
-use gio::prelude::*;
 use glib::{self, clone};
 #[allow(unused_imports)]
 use log::*;
 use unirun_if::{
     package::{Command, Hit, Package, PackageId, Payload},
-    socket::{connection, stream_read_future, stream_write_future},
+    socket::Stream,
 };
 
 const SHOW_ON_EMPTY: bool = false;
 
-async fn send_data(
-    hits: Rc<RefCell<Vec<Hit>>>,
-    connection: gio::SocketConnection,
-) -> Result<(), Box<dyn Error>> {
+async fn send_data(hits: Rc<RefCell<Vec<Hit>>>, stream: Stream) -> Result<(), Box<dyn Error>> {
     'send_data: for hit in hits.borrow().iter() {
         'send_hit: loop {
             let hit_package = Package::new(Payload::Hit(hit.clone()));
             let hit_package_id = hit_package.get_id();
 
             debug!("Sending {}", hit);
-            stream_write_future(&connection.output_stream(), hit_package).await?;
+            stream.write_future(hit_package).await?;
 
-            let response = stream_read_future(&connection.input_stream()).await?;
+            let response = stream.read_future().await?;
             debug!("Got response: {:?}", response);
 
             match response.payload {
@@ -50,7 +46,7 @@ async fn send_data(
 async fn handle_command(
     command: &Command,
     id_to_answer: PackageId,
-    connection: gio::SocketConnection,
+    stream: Stream,
     engines: Rc<RefCell<Vec<Engine>>>,
     hits: Rc<RefCell<Vec<Hit>>>,
     main_loop: glib::MainLoop,
@@ -71,11 +67,9 @@ async fn handle_command(
         Command::Quit => {
             info!("Quit");
 
-            let _ = stream_write_future(
-                &connection.output_stream(),
-                Package::new(Payload::Result((id_to_answer, Ok(())))),
-            )
-            .await;
+            let _ = stream
+                .write_future(Package::new(Payload::Result((id_to_answer, Ok(())))))
+                .await;
 
             main_loop.quit();
         }
@@ -84,19 +78,15 @@ async fn handle_command(
             // todo!();
             refresh_data(text, engines.clone(), hits.clone());
 
-            stream_write_future(
-                &connection.output_stream(),
-                Package::new(Payload::Result((id_to_answer, Ok(())))),
-            )
-            .await?;
+            stream
+                .write_future(Package::new(Payload::Result((id_to_answer, Ok(())))))
+                .await?;
 
-            send_data(hits.clone(), connection.clone()).await?;
+            send_data(hits.clone(), stream.clone()).await?;
 
-            stream_write_future(
-                &connection.output_stream(),
-                Package::new(Payload::Command(Command::Abort)),
-            )
-            .await?;
+            stream
+                .write_future(Package::new(Payload::Command(Command::Abort)))
+                .await?;
         }
         Command::Activate(hit_id) => {
             if let Some(engine) = engines
@@ -105,27 +95,23 @@ async fn handle_command(
                 .zip(hits.borrow().iter())
                 .find_map(|(e, h)| if h.id == *hit_id { Some(e) } else { None })
             {
-                stream_write_future(
-                    &connection.output_stream(),
-                    Package::new(Payload::Result((id_to_answer, {
+                stream
+                    .write_future(Package::new(Payload::Result((id_to_answer, {
                         let answer = match open::that(engine.build()) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(format!("{}", e)),
                         };
                         debug!("Sending: {:?}", answer);
                         answer
-                    }))),
-                )
-                .await?;
+                    }))))
+                    .await?;
             } else {
-                stream_write_future(
-                    &connection.output_stream(),
-                    Package::new(Payload::Result((
+                stream
+                    .write_future(Package::new(Payload::Result((
                         id_to_answer,
                         Err("Plugin info: cannot find data by Hit".to_owned()),
-                    ))),
-                )
-                .await?;
+                    ))))
+                    .await?;
             }
         }
     }
@@ -135,7 +121,7 @@ async fn handle_command(
 fn main() -> Result<(), glib::Error> {
     env_logger::init();
 
-    let connection = connection()?;
+    let stream = Stream::new()?;
     let engines = Rc::new(RefCell::new(Vec::new()));
     let hits = Rc::new(RefCell::new(Vec::new()));
     let main_loop = glib::MainLoop::new(None, true);
@@ -147,13 +133,11 @@ fn main() -> Result<(), glib::Error> {
             loop {
                 debug!("Waiting for command");
 
-                let command_package = stream_read_future(&connection.input_stream())
-                    .await
-                    .unwrap_or_else(|e| {
-                        error!("{}", e);
-                        main_loop.quit();
-                        panic!("{}", e)
-                    });
+                let command_package = stream.read_future().await.unwrap_or_else(|e| {
+                    error!("{}", e);
+                    main_loop.quit();
+                    panic!("{}", e)
+                });
                 let command_package_id = command_package.get_id();
                 debug!("Received: {:?}", command_package);
 
@@ -162,7 +146,7 @@ fn main() -> Result<(), glib::Error> {
                         handle_command(
                             command,
                             command_package_id,
-                            connection.clone(),
+                            stream.clone(),
                             engines.clone(),
                             hits.clone(),
                             main_loop.clone(),
